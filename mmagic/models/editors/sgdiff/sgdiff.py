@@ -5,7 +5,9 @@ from mmengine.optim import OptimWrapperDict
 from tqdm import tqdm
 
 from mmagic.registry import MODELS
+from mmagic.structures import DataSample
 from ..glide.glide import Glide
+from .training_utils import GaussianDiffusionTrainingLoss
 
 
 @MODELS.register_module()
@@ -19,6 +21,8 @@ class SGDiff(Glide):
     def __init__(self,
                  modalities: list = ['txt', 'style'],
                  cond_prob=0.2,
+                 perceptual_loss=None,
+                 val_cfg=None,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
@@ -29,6 +33,25 @@ class SGDiff(Glide):
         self.modalities = modalities
         if isinstance(cond_prob, dict):
             assert set(cond_prob.keys()) <= set(modalities)
+            self.cond_prob = {
+                modality: float(cond_prob.get(modality, 0.0))
+                for modality in modalities
+            }
+        else:
+            self.cond_prob = {
+                modality: float(cond_prob)
+                for modality in modalities
+            }
+        if not all(0.0 <= prob <= 1.0
+                   for prob in self.cond_prob.values()):
+            raise ValueError('cond_prob must be in the range [0, 1].')
+
+        self.training_loss = GaussianDiffusionTrainingLoss(
+            self.diffusion_scheduler.betas)
+        self.perceptual_loss = (
+            MODELS.build(perceptual_loss) if isinstance(
+                perceptual_loss, dict) else perceptual_loss)
+        self.val_cfg = val_cfg or {}
 
     @torch.no_grad()
     def infer(self,
@@ -269,13 +292,99 @@ class SGDiff(Glide):
         return {'samples': image}
 
     def train_step(self, data: dict, optim_wrapper: OptimWrapperDict):
-        raise NotImplementedError
+        data = self.data_preprocessor(data, training=True)
+        inputs = data['inputs']
+        real_imgs = inputs['img']
+        conditions = {
+            key: inputs[key]
+            for modality in self.modalities
+            for key in self.MODALITIES[modality]
+        }
+        conditions = self._drop_conditions(conditions)
 
+        model = self.unet.module if is_model_wrapper(
+            self.unet) else self.unet
+        loss_outputs = self.training_loss(model, real_imgs, conditions)
+        loss_dict = {
+            'loss_simple': loss_outputs['simple_loss'],
+            'loss_vlb': loss_outputs['vlb_loss'],
+        }
+        if self.perceptual_loss is not None:
+            perceptual_loss, _ = self.perceptual_loss(
+                loss_outputs['pred_xstart'], real_imgs)
+            loss_dict['loss_perceptual'] = perceptual_loss
+
+        loss, log_vars = self.parse_losses(loss_dict)
+        optim_wrapper['unet'].update_params(loss)
+        return log_vars
+
+    @torch.no_grad()
     def val_step(self, data: dict, show_progress=False):
-        raise NotImplementedError
+        data = self.data_preprocessor(data, training=False)
+        inputs = data['inputs']
+        batch_size = inputs['img'].shape[0]
+        conditions = {
+            key: inputs[key]
+            for modality in self.modalities
+            for key in self.MODALITIES[modality]
+        }
+
+        num_inference_steps = self.val_cfg.get('num_inference_steps', 100)
+        if len(self.modalities) == 1:
+            outputs = self.infer(
+                batch_size=batch_size,
+                modalities=self.modalities,
+                guidance_scale=self.val_cfg.get('guidance_scale', 1.0),
+                num_inference_steps=num_inference_steps,
+                show_progress=show_progress,
+                **conditions)
+        else:
+            modality_order_cfg = self.val_cfg.get(
+                'modality_order_cfg', {
+                    modality: 1.0
+                    for modality in self.modalities
+                })
+            outputs = self.infer_mm(
+                batch_size=batch_size,
+                modality_order_cfg=modality_order_cfg,
+                num_inference_steps=num_inference_steps,
+                up_inference_steps=self.val_cfg.get('up_inference_steps', 35),
+                show_progress=show_progress,
+                **conditions)
+
+        return [
+            DataSample(
+                fake_img=outputs['samples'][index],
+                gt_img=inputs['img'][index])
+            for index in range(batch_size)
+        ]
 
     def test_step(self, data: dict):
         return self.val_step(data, show_progress=True)
+
+    def _drop_conditions(self, conditions):
+        batch_size = next(iter(conditions.values())).shape[0]
+        dropped = dict(conditions)
+        for modality in self.modalities:
+            probability = self.cond_prob[modality]
+            if probability == 0:
+                continue
+            drop_mask = torch.rand(
+                batch_size, device=self.device) < probability
+            if not drop_mask.any():
+                continue
+            unconditional = self.get_uncond(
+                dropped,
+                batch_size,
+                {modality: True},
+                modalities=[modality],
+                prefix='')
+            for key in self.MODALITIES[modality]:
+                value = dropped[key]
+                shape = [batch_size] + [1] * (value.ndim - 1)
+                dropped[key] = torch.where(
+                    drop_mask.view(shape), unconditional[key], value)
+        return dropped
 
     def set_uncond(self, cond_dict: dict, batch_size, modalities: list = None):
         if modalities is None:

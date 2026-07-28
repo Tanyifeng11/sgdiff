@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import locale
 import logging
 import os
 import os.path as osp
@@ -8,6 +9,9 @@ from mmengine.config import Config, DictAction
 from mmengine.runner import Runner
 
 from mmagic.utils import print_colored_log
+
+if os.name == 'nt':
+    locale.getpreferredencoding = lambda do_setlocale=True: 'utf-8'
 
 
 def parse_args():

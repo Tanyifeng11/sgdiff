@@ -7,7 +7,7 @@ from mmengine.runner import set_random_seed
 from PIL import Image
 from torchvision.utils import save_image
 
-from mmagic.apis import init_model
+from mmagic.apis.inferencers.inference_functions import init_model
 
 parser = argparse.ArgumentParser(description='Run inference with SGDiff model')
 parser.add_argument(

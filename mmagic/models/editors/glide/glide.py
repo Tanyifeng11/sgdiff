@@ -9,12 +9,12 @@ import torch.nn.functional as F
 from mmengine import MessageHub
 from mmengine.model import BaseModel, is_model_wrapper
 from mmengine.optim import OptimWrapperDict
-from mmengine.runner.checkpoint import _load_checkpoint_with_prefix
 from tqdm import tqdm
 
 from mmagic.registry import DIFFUSION_SCHEDULERS, MODELS
 from mmagic.structures import DataSample
 from mmagic.utils.typing import ForwardInputs, SampleList
+from .glide_ckpt import load_glide_state_dict
 
 ModelType = Union[Dict, nn.Module]
 
@@ -105,18 +105,24 @@ class Glide(BaseModel):
             self.unet.convert_to_fp16()
 
     def load_pretrained_models(self, pretrained_cfgs):
-        """_summary_
+        """Load pretrained weights into the submodules named by the keys of
+        ``pretrained_cfgs``.
+
+        Both MMagic checkpoints and the original GLIDE ``*.pt`` files released
+        by OpenAI / LAION are accepted; the latter are renamed on the fly by
+        :func:`~mmagic.models.editors.glide.glide_ckpt.load_glide_state_dict`.
 
         Args:
-            pretrained_cfgs (_type_): _description_
+            pretrained_cfgs (dict): Maps a submodule name, e.g. ``'unet_up'``,
+                to a dict with the keys ``ckpt_path`` and, optionally,
+                ``prefix``, ``map_location`` and ``strict``.
         """
         for key, ckpt_cfg in pretrained_cfgs.items():
             prefix = ckpt_cfg.get('prefix', '')
             map_location = ckpt_cfg.get('map_location', 'cpu')
             strict = ckpt_cfg.get('strict', True)
             ckpt_path = ckpt_cfg.get('ckpt_path')
-            state_dict = _load_checkpoint_with_prefix(prefix, ckpt_path,
-                                                      map_location)
+            state_dict = load_glide_state_dict(ckpt_path, prefix, map_location)
             getattr(self, key).load_state_dict(state_dict, strict=strict)
             mmengine.print_log(f'Load pretrained {key} from {ckpt_path}')
 

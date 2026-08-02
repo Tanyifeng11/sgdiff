@@ -1,8 +1,7 @@
 import torch
-from mmengine.runner.checkpoint import _load_checkpoint_with_prefix
 
 from mmagic.registry import MODELS
-from ..glide import Text2ImUNet
+from ..glide import Text2ImUNet, load_glide_state_dict
 
 
 @MODELS.register_module()
@@ -41,8 +40,8 @@ class MM2ImUNet(Text2ImUNet):
         strict = pretrained_cfg.get('strict', True)
         ckpt_path = pretrained_cfg.get('ckpt_path')
 
-        state_dict = _load_checkpoint_with_prefix(prefix, ckpt_path,
-                                                  map_location)
+        # accepts both MMagic checkpoints and the original GLIDE ``*.pt`` files
+        state_dict = load_glide_state_dict(ckpt_path, prefix, map_location)
         self.load_state_dict(state_dict, strict=strict)
 
         # Freeze the parameters

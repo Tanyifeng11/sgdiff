@@ -2,9 +2,11 @@ _base_ = ['./sgdiff-bf-glide-64x64.py']
 
 work_dir = './work_dirs/sgdiff_bf_style'
 stage1_ckpt = './work_dirs/sgdiff_bf_glide/iter_235000.pth'
-glide_up_ckpt = (
-    'https://download.openxlab.org.cn/models/mmediting/GLIDE/weight/'
-    'glide_laion-64-256')
+# Original GLIDE 64->256 upsampler released by OpenAI. It replaces the MMagic
+# mirror `.../GLIDE/weight/glide_laion-64-256`, which is no longer available.
+# The parameter names are translated to the MMagic layout while loading, so no
+# offline conversion step is needed.
+glide_up_ckpt = '/share/home/u2515283058/sgdiff/checkpoint/upsample.pt'
 
 style_encoder_cfg = dict(
     _delete_=True,

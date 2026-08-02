@@ -3,9 +3,13 @@ _base_ = ['../_base_/gen_default_runtime.py']
 work_dir = './work_dirs/sgdiff_bf_glide'
 data_root = '/share/home/u2515283058/datasets/BF'
 
-glide_ckpt = (
-    'https://download.openmmlab.com/mmediting/glide/'
-    'glide_laion-64x64-02afff47.pth')
+# Local GLIDE weights. The MMagic mirrors of the GLIDE checkpoints are no
+# longer reachable, so the original releases are used instead:
+# `laionide-v3-base.pt` (LAION fine-tune of the GLIDE 64x64 base model) and
+# `upsample.pt` (GLIDE 64->256 upsampler, loaded by the stage-2 config). Their
+# parameter names are translated to the MMagic layout while loading, see
+# `mmagic/models/editors/glide/glide_ckpt.py`.
+glide_ckpt = '/share/home/u2515283058/sgdiff/checkpoint/laionide-v3-base.pt'
 
 model = dict(
     type='SGDiff',

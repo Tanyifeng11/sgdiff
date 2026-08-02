@@ -7,11 +7,12 @@ val_step = 5000
 work_dir = './work_dirs/sgdiff'
 
 # original glide model ckpt
-# unet_ckpt_path = 'https://download.openmmlab.com/mmediting/glide/glide_laion-64x64-02afff47.pth'  # noqa
+# unet_ckpt_path = (
+#     '/share/home/u2515283058/sgdiff/checkpoint/laionide-v3-base.pt')
 # fine-tuned glide model ckpt
 unet_ckpt_path = 'glide-fine_tuned.pth'
 # original glide upsampling ckpt
-unet_up_ckpt_path = 'https://download.openxlab.org.cn/models/mmediting/GLIDE/weight/glide_laion-64-256'  # noqa
+unet_up_ckpt_path = '/share/home/u2515283058/sgdiff/checkpoint/upsample.pt'
 
 style_encoder_cfg = dict(
     type='ClipAttnEmbedding',

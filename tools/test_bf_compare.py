@@ -10,8 +10,9 @@ from typing import Dict, List
 import numpy as np
 import torch
 from PIL import Image
+from mmengine.config import Config
 
-from mmagic.apis.inferencers.inference_functions import init_model
+from tools.sample_sgdiff import load_model
 
 
 IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png'}
@@ -33,7 +34,7 @@ def parse_args():
         default='configs/sgdiff/sgdiff-bf-style-64x64.py')
     parser.add_argument(
         '--finetuned-ckpt',
-        default='work_dirs/sgdiff_bf_style/iter_50000.pth')
+        default='work_dirs/sgdiff_bf_style_v2/iter_50000.pth')
     parser.add_argument(
         '--output-dir', default='results/bf_validation_compare')
     parser.add_argument('--device', default='cuda:0')
@@ -41,10 +42,10 @@ def parse_args():
     parser.add_argument('--num-inference-steps', type=int, default=100)
     parser.add_argument('--up-inference-steps', type=int, default=35)
     parser.add_argument(
-        '--text-guidance', type=float, default=1.5,
+        '--text-guidance', type=float, default=1.0,
         help='Classifier-free guidance scale for text.')
     parser.add_argument(
-        '--style-guidance', type=float, default=2.0,
+        '--style-guidance', type=float, default=1.2,
         help='Classifier-free guidance scale for style image.')
     parser.add_argument(
         '--max-samples',
@@ -118,8 +119,8 @@ def generate(model_name: str, config: str, checkpoint: str, samples: List[dict],
     model_dir = output_dir / model_name
     model_dir.mkdir(parents=True, exist_ok=True)
     print(f'Loading {model_name} checkpoint: {checkpoint}')
-    model = init_model(config, checkpoint, device=args.device)
-    guidance = {'txt': args.text_guidance, 'style': args.style_guidance}
+    model = load_model(Config.fromfile(config), checkpoint, args.device)
+    guidance = {'style': args.style_guidance, 'txt': args.text_guidance}
 
     for index, sample in enumerate(samples):
         output_path = model_dir / f"{sample['id']}.png"

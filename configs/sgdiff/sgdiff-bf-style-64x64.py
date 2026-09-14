@@ -1,12 +1,9 @@
 _base_ = ['./sgdiff-bf-glide-64x64.py']
 
-work_dir = './work_dirs/sgdiff_bf_style'
-stage1_ckpt = './work_dirs/sgdiff_bf_glide/iter_235000.pth'
-# Original GLIDE 64->256 upsampler released by OpenAI. It replaces the MMagic
-# mirror `.../GLIDE/weight/glide_laion-64-256`, which is no longer available.
-# The parameter names are translated to the MMagic layout while loading, so no
-# offline conversion step is needed.
-glide_up_ckpt = '/share/home/u2515283058/sgdiff/checkpoint/upsample.pt'
+work_dir = './work_dirs/sgdiff_bf_style_v2'
+stage1_ckpt = './work_dirs/sgdiff_bf_glide_v2/iter_235000.pth'
+# 超分模型使用原始预训练权重，第二阶段不更新它。
+glide_up_ckpt = './checkpoint/upsample.pt'
 
 style_encoder_cfg = dict(
     _delete_=True,
@@ -64,6 +61,8 @@ model = dict(
     pretrained_cfgs=dict(
         unet_up=dict(
             ckpt_path=glide_up_ckpt, prefix='unet_up', strict=True)),
+    # 保留论文式 (12) 的原始 x0；设 True 可裁剪感知损失输入以抑制尖峰。
+    perceptual_clip=False,
     perceptual_loss=dict(
         _delete_=True,
         type='PerceptualLoss',
@@ -79,6 +78,7 @@ model = dict(
         norm_img=True,
         criterion='mse'),
     val_cfg=dict(
+        _delete_=True,
         num_inference_steps=100,
         up_inference_steps=35,
         modality_order_cfg=dict(style=1.2, txt=1.0)))
@@ -88,7 +88,27 @@ train_dataloader = dict(
     dataset=dict(style_dir='texture', style_size=256))
 
 optim_wrapper = dict(
-    unet=dict(optimizer=dict(type='AdamW', lr=1e-5)))
+    unet=dict(
+        type='OptimWrapper', optimizer=dict(type='AdamW', lr=1e-5)))
 
 train_cfg = dict(
     _delete_=True, type='IterBasedTrainLoop', max_iters=50000)
+
+custom_hooks = [
+    dict(
+        type='SGDiffVisualizationHook',
+        interval=5000,
+        num_samples=2,
+        seed=2022,
+        dataset=dict(
+            type='BFDataset',
+            data_root=_base_.data_root,
+            split='validation',
+            target_dir='gt',
+            text_dir='text',
+            style_dir='texture',
+            image_size=64,
+            style_size=256,
+            text_ctx=128,
+            max_samples=2))
+]

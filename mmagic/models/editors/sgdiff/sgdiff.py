@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 from mmagic.registry import MODELS
 from mmagic.structures import DataSample
-from ..glide.glide import Glide
+from ..glide.glide import Glide, preserve_sampling_state
 from .training_utils import GaussianDiffusionTrainingLoss
 
 
@@ -22,6 +22,7 @@ class SGDiff(Glide):
                  modalities: list = ['txt', 'style'],
                  cond_prob=0.2,
                  perceptual_loss=None,
+                 perceptual_clip=False,
                  val_cfg=None,
                  *args,
                  **kwargs):
@@ -51,14 +52,30 @@ class SGDiff(Glide):
         self.perceptual_loss = (
             MODELS.build(perceptual_loss) if isinstance(
                 perceptual_loss, dict) else perceptual_loss)
+        # 论文式 (12)-(14) 默认使用未经裁剪的 x0；裁剪仅作可选稳定化。
+        self.perceptual_clip = perceptual_clip
         self.val_cfg = val_cfg or {}
+        if self.unet_up is not None:
+            self.unet_up.requires_grad_(False)
+            self.unet_up.eval()
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.unet_up is not None:
+            self.unet_up.eval()
+        if self.perceptual_loss is not None:
+            self.perceptual_loss.eval()
+        return self
 
     @torch.no_grad()
+    @preserve_sampling_state
     def infer(self,
               init_image=None,
               batch_size=1,
               guidance_scale=3.,
               num_inference_steps=50,
+              up_inference_steps=35,
+              run_up=True,
               show_progress=False,
               modalities: list = None,
               **conditions):
@@ -89,9 +106,6 @@ class SGDiff(Glide):
         else:
             image = init_image
 
-        # set to evaluation
-        model.eval()
-        ori_time_steps = len(self.diffusion_scheduler.timesteps)
         self.diffusion_scheduler.set_timesteps(num_inference_steps)
 
         timesteps = self.diffusion_scheduler.timesteps
@@ -140,21 +154,20 @@ class SGDiff(Glide):
         if init_image is not None:
             init_image = init_image[:batch_size]
 
-        # upsample image
-        if self.unet_up:
+        low_res_samples = image
+        if run_up and self.unet_up is not None:
             image = self.infer_up(
                 low_res_img=image,
                 batch_size=batch_size,
                 tokens=tokens,
                 mask=token_mask,
+                num_inference_steps=up_inference_steps,
                 show_progress=show_progress)
 
-        # set back to train
-        model.train()
-        self.diffusion_scheduler.set_timesteps(ori_time_steps)
-        return {'samples': image}
+        return {'samples': image, 'low_res_samples': low_res_samples}
 
     @torch.no_grad()
+    @preserve_sampling_state
     def infer_mm(self,
                  init_image=None,
                  batch_size=1,
@@ -164,6 +177,7 @@ class SGDiff(Glide):
                  },
                  num_inference_steps=50,
                  up_inference_steps=35,
+                 run_up=True,
                  show_progress=False,
                  **conditions):
         """inference for multi-modality.
@@ -207,9 +221,6 @@ class SGDiff(Glide):
         else:
             image = init_image
 
-        # set to evaluation
-        model.eval()
-        ori_time_steps = len(self.diffusion_scheduler.timesteps)
         self.diffusion_scheduler.set_timesteps(num_inference_steps)
 
         timesteps = self.diffusion_scheduler.timesteps
@@ -276,8 +287,8 @@ class SGDiff(Glide):
         if init_image is not None:
             init_image = init_image[:batch_size]
 
-        # upsample image
-        if self.unet_up:
+        low_res_samples = image
+        if run_up and self.unet_up is not None:
             image = self.infer_up(
                 low_res_img=image,
                 batch_size=batch_size,
@@ -286,10 +297,7 @@ class SGDiff(Glide):
                 num_inference_steps=up_inference_steps,
                 show_progress=show_progress)
 
-        # set back to train cfg
-        model.train()
-        self.diffusion_scheduler.set_timesteps(ori_time_steps)
-        return {'samples': image}
+        return {'samples': image, 'low_res_samples': low_res_samples}
 
     def train_step(self, data: dict, optim_wrapper: OptimWrapperDict):
         data = self.data_preprocessor(data, training=True)
@@ -302,20 +310,25 @@ class SGDiff(Glide):
         }
         conditions = self._drop_conditions(conditions)
 
-        model = self.unet.module if is_model_wrapper(
-            self.unet) else self.unet
-        loss_outputs = self.training_loss(model, real_imgs, conditions)
-        loss_dict = {
-            'loss_simple': loss_outputs['simple_loss'],
-            'loss_vlb': loss_outputs['vlb_loss'],
-        }
-        if self.perceptual_loss is not None:
-            perceptual_loss, _ = self.perceptual_loss(
-                loss_outputs['pred_xstart'], real_imgs)
-            loss_dict['loss_perceptual'] = perceptual_loss
-
-        loss, log_vars = self.parse_losses(loss_dict)
-        optim_wrapper['unet'].update_params(loss)
+        optimizer = optim_wrapper['unet']
+        # optim_context 同时处理 AMP 和梯度累积，不能绕过 DDP 的 forward。
+        with optimizer.optim_context(self.unet):
+            loss_outputs = self.training_loss(self.unet, real_imgs, conditions)
+            with torch.cuda.amp.autocast(enabled=False):
+                loss_dict = {
+                    'loss_simple': loss_outputs['simple_loss'],
+                    'loss_vlb': loss_outputs['vlb_loss'],
+                }
+                if self.perceptual_loss is not None:
+                    pred_xstart = loss_outputs['pred_xstart']
+                    if self.perceptual_clip:
+                        pred_xstart = pred_xstart.clamp(-1, 1)
+                    # 高噪声时间步的 x0 重建与 VGG 损失使用 FP32。
+                    perceptual_loss, _ = self.perceptual_loss(
+                        pred_xstart.float(), real_imgs.float())
+                    loss_dict['loss_perceptual'] = perceptual_loss
+                loss, log_vars = self.parse_losses(loss_dict)
+                optimizer.update_params(loss)
         return log_vars
 
     @torch.no_grad()

@@ -17,7 +17,7 @@ conda activate sgdiff
 PROJECT_ROOT=/share/home/u2515283058/sgdiff
 DATA_ROOT=/share/home/u2515283058/datasets/BF
 ORIGINAL_CKPT="${PROJECT_ROOT}/checkpoint/sgdiff.pth"
-FINETUNED_CKPT="${PROJECT_ROOT}/work_dirs/sgdiff_bf_style/iter_50000.pth"
+FINETUNED_CKPT="${PROJECT_ROOT}/work_dirs/sgdiff_bf_style_v2/iter_50000.pth"
 OUTPUT_DIR="${PROJECT_ROOT}/results/bf_validation_compare"
 MAX_SAMPLES="${MAX_SAMPLES:-}"
 

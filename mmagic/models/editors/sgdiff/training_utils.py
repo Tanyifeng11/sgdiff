@@ -122,14 +122,18 @@ class GaussianDiffusionTrainingLoss:
                 log_scales=0.5 * model_log_variance)) / math.log(2.0)
         return torch.where(timesteps == 0, decoder_nll, kl).mean()
 
-    def __call__(self, model, x_start, conditions):
+    def __call__(self, model, x_start, conditions, timesteps=None, noise=None):
+        """论文式 (5)、(12)、(14)；可固定时间步和噪声用于诊断。"""
+        x_start = x_start.float()
         batch_size = x_start.shape[0]
-        timesteps = torch.randint(
-            0,
-            self.num_timesteps, (batch_size, ),
-            device=x_start.device,
-            dtype=torch.long)
-        noise = torch.randn_like(x_start)
+        if timesteps is None:
+            timesteps = torch.randint(
+                0,
+                self.num_timesteps, (batch_size, ),
+                device=x_start.device,
+                dtype=torch.long)
+        if noise is None:
+            noise = torch.randn_like(x_start)
         x_t = self.q_sample(x_start, timesteps, noise)
         model_output = model(x_t, timesteps, **conditions)
 
@@ -138,12 +142,14 @@ class GaussianDiffusionTrainingLoss:
             raise ValueError(
                 'SGDiff training requires epsilon and learned variance '
                 f'outputs, but received {model_output.shape[1]} channels.')
-        epsilon, variance_values = torch.split(
-            model_output, channels, dim=1)
-        simple_loss = (epsilon - noise).pow(2).mean()
-        vlb_loss = self._vlb(x_start, x_t, timesteps, epsilon,
-                             variance_values)
-        pred_xstart = self.predict_xstart(x_t, timesteps, epsilon)
+        # 网络前向可用 AMP；KL、方差指数和 x0 重建保留 FP32。
+        with torch.cuda.amp.autocast(enabled=False):
+            epsilon, variance_values = torch.split(
+                model_output.float(), channels, dim=1)
+            simple_loss = (epsilon - noise.float()).pow(2).mean()
+            vlb_loss = self._vlb(x_start, x_t, timesteps, epsilon,
+                                 variance_values)
+            pred_xstart = self.predict_xstart(x_t, timesteps, epsilon)
         return {
             'simple_loss': simple_loss,
             'vlb_loss': vlb_loss,

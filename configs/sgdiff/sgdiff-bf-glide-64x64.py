@@ -1,15 +1,10 @@
 _base_ = ['../_base_/gen_default_runtime.py']
 
-work_dir = './work_dirs/sgdiff_bf_glide'
+work_dir = './work_dirs/sgdiff_bf_glide_v2'
 data_root = '/share/home/u2515283058/datasets/BF'
 
-# Local GLIDE weights. The MMagic mirrors of the GLIDE checkpoints are no
-# longer reachable, so the original releases are used instead:
-# `laionide-v3-base.pt` (LAION fine-tune of the GLIDE 64x64 base model) and
-# `upsample.pt` (GLIDE 64->256 upsampler, loaded by the stage-2 config). Their
-# parameter names are translated to the MMagic layout while loading, see
-# `mmagic/models/editors/glide/glide_ckpt.py`.
-glide_ckpt = '/share/home/u2515283058/sgdiff/checkpoint/laionide-v3-base.pt'
+# 从项目根目录启动训练，加载本地 GLIDE 权重。
+glide_ckpt = './checkpoint/laionide-v3-base.pt'
 
 model = dict(
     type='SGDiff',
@@ -57,6 +52,7 @@ model = dict(
     unet_up=None,
     diffusion_scheduler_up=None,
     perceptual_loss=None,
+    val_cfg=dict(num_inference_steps=100, guidance_scale=1.0),
     use_fp16=False)
 
 train_dataloader = dict(
@@ -76,12 +72,32 @@ train_dataloader = dict(
         text_ctx=128))
 
 optim_wrapper = dict(
-    unet=dict(optimizer=dict(type='AdamW', lr=1e-4)))
+    unet=dict(
+        type='OptimWrapper', optimizer=dict(type='AdamW', lr=1e-4)))
 
 train_cfg = dict(
     _delete_=True, type='IterBasedTrainLoop', max_iters=235000)
 val_cfg = val_evaluator = val_dataloader = None
 test_cfg = test_evaluator = test_dataloader = None
+
+# 独立读取固定验证样本，训练前及每次保存 checkpoint 时检查生成效果。
+custom_hooks = [
+    dict(
+        type='SGDiffVisualizationHook',
+        interval=5000,
+        num_samples=2,
+        seed=2022,
+        dataset=dict(
+            type='BFDataset',
+            data_root=data_root,
+            split='validation',
+            target_dir='gt',
+            text_dir='text',
+            style_dir=None,
+            image_size=64,
+            text_ctx=128,
+            max_samples=2))
+]
 
 default_hooks = dict(
     logger=dict(type='LoggerHook', interval=100, log_metric_by_epoch=False),

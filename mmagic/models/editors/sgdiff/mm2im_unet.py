@@ -20,6 +20,8 @@ class MM2ImUNet(Text2ImUNet):
         self.fix_glide = fix_glide
         if pretrained_cfg is not None:
             self._load_pretrained_and_fix(pretrained_cfg)
+        if self.fix_glide:
+            self.requires_grad_(False)
 
         if style_encoder_cfg is not None:
             self.style_encoder = MODELS.build(style_encoder_cfg)
@@ -30,9 +32,19 @@ class MM2ImUNet(Text2ImUNet):
             self.edge_encoder = MODELS.build(edge_encoder_cfg)
         else:
             self.edge_encoder = None
+        self.train(self.training)
 
     def init_weights(self, *args, **kwargs):
         pass
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.fix_glide:
+            # 固定的 GLIDE 关闭 dropout，但保留穿过主干到风格模块的梯度。
+            for name, module in self.named_children():
+                if name not in ('style_encoder', 'edge_encoder'):
+                    module.eval()
+        return self
 
     def _load_pretrained_and_fix(self, pretrained_cfg: dict):
         prefix = pretrained_cfg.get('prefix', 'unet')
@@ -43,11 +55,6 @@ class MM2ImUNet(Text2ImUNet):
         # accepts both MMagic checkpoints and the original GLIDE ``*.pt`` files
         state_dict = load_glide_state_dict(ckpt_path, prefix, map_location)
         self.load_state_dict(state_dict, strict=strict)
-
-        # Freeze the parameters
-        if self.fix_glide:
-            for param in self.parameters():
-                param.requires_grad = False
 
     def get_text_emb(self, tokens, token_mask, **conditions):
         assert tokens is not None

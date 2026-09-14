@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from copy import deepcopy
+from functools import wraps
 from typing import Dict, List, Optional, Union
 
 import mmengine
@@ -17,6 +18,32 @@ from mmagic.utils.typing import ForwardInputs, SampleList
 from .glide_ckpt import load_glide_state_dict
 
 ModelType = Union[Dict, nn.Module]
+
+
+def preserve_sampling_state(infer):
+    """采样结束后恢复各模块模式和调度器，训练中预览也适用。"""
+
+    @wraps(infer)
+    def wrapped(self, *args, **kwargs):
+        modes = [(module, module.training) for module in self.modules()]
+        schedulers = [
+            (scheduler, scheduler.timesteps.copy(),
+             scheduler.num_inference_steps)
+            for scheduler in (self.diffusion_scheduler,
+                              self.diffusion_scheduler_up)
+            if scheduler is not None
+        ]
+        self.eval()
+        try:
+            return infer(self, *args, **kwargs)
+        finally:
+            for module, training in modes:
+                module.training = training
+            for scheduler, timesteps, steps in schedulers:
+                scheduler.timesteps = timesteps
+                scheduler.num_inference_steps = steps
+
+    return wrapped
 
 
 def classifier_grad(classifier, x, t, y=None, classifier_scale=1.0):
@@ -123,7 +150,12 @@ class Glide(BaseModel):
             strict = ckpt_cfg.get('strict', True)
             ckpt_path = ckpt_cfg.get('ckpt_path')
             state_dict = load_glide_state_dict(ckpt_path, prefix, map_location)
-            getattr(self, key).load_state_dict(state_dict, strict=strict)
+            module = getattr(self, key)
+            module.load_state_dict(state_dict, strict=strict)
+            # BaseModule.init_weights 会递归初始化未标记的子模块。
+            # 这里已加载预训练参数，禁止 Runner 再将超分输出层等置零。
+            if hasattr(module, '_is_init'):
+                module._is_init = True
             mmengine.print_log(f'Load pretrained {key} from {ckpt_path}')
 
     @property
@@ -245,6 +277,7 @@ class Glide(BaseModel):
         return {'samples': image}
 
     @torch.no_grad()
+    @preserve_sampling_state
     def infer_up(self,
                  low_res_img: torch.Tensor,
                  batch_size: int = 1,
@@ -273,10 +306,12 @@ class Glide(BaseModel):
         Returns:
             torch.Tensor: Generated upsampled images (shape: [B, C, H, W]).
         """
+        model = self.unet_up.module if is_model_wrapper(
+            self.unet_up) else self.unet_up
         if init_image is None:
             image = torch.randn(
-                (batch_size, self.unet_up.in_channels // 2,
-                 self.unet_up.image_size, self.unet_up.image_size))
+                (batch_size, model.in_channels // 2,
+                 model.image_size, model.image_size))
             image = image.to(self.device)
         else:
             image = init_image
@@ -292,7 +327,7 @@ class Glide(BaseModel):
             tokens, mask = self.unet.tokenizer.padded_tokens_and_mask(
                 tokens, 128)
             tokens = torch.tensor(
-                [tokens] * batch_size, dtype=torch.bool, device=self.device)
+                [tokens] * batch_size, dtype=torch.long, device=self.device)
             mask = torch.tensor(
                 [mask] * batch_size, dtype=torch.bool, device=self.device)
 
@@ -300,7 +335,7 @@ class Glide(BaseModel):
             timesteps = tqdm(timesteps)
 
         for t in timesteps:
-            noise_pred = self.unet_up(
+            noise_pred = model(
                 image, t, low_res=low_res_img, tokens=tokens, mask=mask)
             # compute previous image: x_t -> x_t-1
             diffusion_scheduler_output = self.diffusion_scheduler_up.step(

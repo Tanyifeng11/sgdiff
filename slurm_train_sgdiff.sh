@@ -10,7 +10,8 @@
 #SBATCH --output=/share/home/u2515283058/sgdiff/sgdiff_train_%j.log
 #SBATCH --error=/share/home/u2515283058/sgdiff/sgdiff_train_%j.err
 
-# 默认运行两阶段；也可提交 sbatch slurm_train_sgdiff.sh stage1 或 stage2。
+# 默认运行两阶段，每阶段训练后自动测试；stage1/stage2 仅运行相应阶段及测试。
+# 仅测试：sbatch slurm_train_sgdiff.sh test（第二阶段）或 test1（第一阶段）。
 # 双卡提交：sbatch --gres=gpu:2 --cpus-per-task=12 --mem=64G slurm_train_sgdiff.sh
 # 团队账号如需计费项目号，在 sbatch 命令中加 --wckey=实际项目号。
 set -eo pipefail
@@ -22,10 +23,21 @@ PROJECT_ROOT=/share/home/u2515283058/sgdiff
 STAGE="${1:-all}"
 # 单独训练第二阶段时，可通过 sbatch --export 覆盖为旧第一阶段权重。
 STAGE1_CKPT="${STAGE1_CKPT:-$PROJECT_ROOT/work_dirs/sgdiff_bf_glide_v2/iter_235000.pth}"
+DATA_ROOT=/share/home/u2515283058/datasets/BF
+TEST_SPLIT="${TEST_SPLIT:-validation}"
+TEST_SAMPLES="${TEST_SAMPLES:-100}"
+TEST_SEED="${TEST_SEED:-42}"
+# 可指定 Mymodel 已生成的固定 split JSON，使两个工程测试同一批样本。
+TEST_SPLIT_FILE="${TEST_SPLIT_FILE:-}"
+TEST_CLIP_MODEL="${TEST_CLIP_MODEL:-openai/clip-vit-large-patch14}"
+TEST_RUN_ID="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
+TEST_OUTPUT_ROOT="${TEST_OUTPUT_ROOT:-$PROJECT_ROOT/results/bf_${TEST_SPLIT}/$TEST_RUN_ID}"
 
 case "$STAGE" in
-    all|stage1|stage2) ;;
-    *) echo "阶段只能是 all、stage1 或 stage2。" >&2; exit 1 ;;
+    all) stages=(1 2) ;;
+    stage1|test1) stages=(1) ;;
+    stage2|test) stages=(2) ;;
+    *) echo "模式只能是 all、stage1、stage2、test 或 test1。" >&2; exit 1 ;;
 esac
 
 cd "$PROJECT_ROOT"
@@ -45,11 +57,14 @@ case "$GPU_COUNT" in
 esac
 
 train_command=(python -u tools/train.py)
+test_command=(python -u tools/test_sgdiff.py)
 launcher=none
 if [[ "$GPU_COUNT" == 2 ]]; then
     # Slurm 启动一个任务，由 torchrun 为每张 GPU 启动一个训练进程。
     train_command=(python -u -m torch.distributed.run --standalone
         --nnodes=1 --nproc_per_node=2 --max_restarts=0 tools/train.py)
+    test_command=(python -u -m torch.distributed.run --standalone
+        --nnodes=1 --nproc_per_node=2 --max_restarts=0 tools/test_sgdiff.py)
     launcher=pytorch
 fi
 
@@ -73,18 +88,42 @@ run_stage() {
         "train_dataloader.batch_size=$per_gpu_batch" "$@"
 }
 
-if [[ "$STAGE" == all || "$STAGE" == stage1 ]]; then
-    run_stage configs/sgdiff/sgdiff-bf-glide-64x64.py \
-        work_dirs/sgdiff_bf_glide_v2 iter_235000.pth 8
-fi
-
-if [[ "$STAGE" == all || "$STAGE" == stage2 ]]; then
-    if [[ ! -s "$STAGE1_CKPT" ]]; then
-        echo "找不到第一阶段权重：$STAGE1_CKPT" >&2
-        exit 1
+for stage_number in "${stages[@]}"; do
+    extra_train_args=()
+    if [[ "$stage_number" == 1 ]]; then
+        config=configs/sgdiff/sgdiff-bf-glide-64x64.py
+        work_dir=work_dirs/sgdiff_bf_glide_v2
+        final_checkpoint=iter_235000.pth
+        global_batch=8
+    else
+        config=configs/sgdiff/sgdiff-bf-style-64x64.py
+        work_dir=work_dirs/sgdiff_bf_style_v2
+        final_checkpoint=iter_50000.pth
+        global_batch=16
+        if [[ "$STAGE" != test && ! -s "$STAGE1_CKPT" ]]; then
+            echo "找不到第一阶段权重：$STAGE1_CKPT" >&2
+            exit 1
+        fi
+        extra_train_args=("model.unet.pretrained_cfg.ckpt_path=$STAGE1_CKPT")
     fi
-    if [[ "$GPU_COUNT" == 2 ]]; then
-        # 先由单进程准备 CLIP 缓存，避免两个 rank 同时写入同一权重文件。
+    test_checkpoint="$PROJECT_ROOT/$work_dir/$final_checkpoint"
+    if [[ "$STAGE" == test1 ]]; then
+        test_checkpoint="$STAGE1_CKPT"
+    fi
+    test_args=("$config" "$test_checkpoint"
+        --data-root "$DATA_ROOT" --split "$TEST_SPLIT"
+        --max-samples "$TEST_SAMPLES" --seed "$TEST_SEED" --split-seed 42
+        --output-dir "$TEST_OUTPUT_ROOT/stage$stage_number"
+        --num-inference-steps 100 --up-inference-steps 35
+        --clip-model "$TEST_CLIP_MODEL")
+    if [[ -n "$TEST_SPLIT_FILE" ]]; then
+        test_args+=(--split-file "$TEST_SPLIT_FILE")
+    fi
+    # 先检查测试数据、指标依赖和缓存，再开始长时间训练。
+    srun --ntasks=1 --kill-on-bad-exit=1 python -u tools/test_sgdiff.py \
+        "${test_args[@]}" --mode prepare
+    if [[ "$stage_number" == 2 ]]; then
+        # 训练和测试前均由单进程准备 CLIP，避免两个 rank 同时写缓存。
         python -u - <<'PY'
 import os
 from mmagic.models.editors.sgdiff.clip_modules import ClipAttnEmbedding, _download
@@ -92,9 +131,15 @@ from mmagic.models.editors.sgdiff.clip_modules import ClipAttnEmbedding, _downlo
 _download(ClipAttnEmbedding.MODELS['ViT-B/32'], os.path.expanduser('~/.cache/clip'))
 PY
     fi
-    run_stage configs/sgdiff/sgdiff-bf-style-64x64.py \
-        work_dirs/sgdiff_bf_style_v2 iter_50000.pth 16 \
-        "model.unet.pretrained_cfg.ckpt_path=$STAGE1_CKPT"
-fi
+    if [[ "$STAGE" != test && "$STAGE" != test1 ]]; then
+        run_stage "$config" "$work_dir" "$final_checkpoint" "$global_batch" \
+            "${extra_train_args[@]}"
+    fi
+    # 每卡生成不同样本；等待所有分片完成后，单进程计算整个测试集的指标。
+    srun --ntasks=1 --kill-on-bad-exit=1 "${test_command[@]}" \
+        "${test_args[@]}" --mode generate
+    srun --ntasks=1 --kill-on-bad-exit=1 python -u tools/test_sgdiff.py \
+        "${test_args[@]}" --mode evaluate
+done
 
-echo "训练完成。固定样本保存在对应 work_dirs/*_v2/samples/。"
+echo "训练与测试完成，测试图片和指标：$TEST_OUTPUT_ROOT"

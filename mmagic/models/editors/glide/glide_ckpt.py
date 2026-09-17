@@ -100,6 +100,21 @@ def unwrap_state_dict(checkpoint: dict) -> dict:
     return checkpoint
 
 
+def normalize_parallel_state_dict(state_dict: Dict) -> 'OrderedDict':
+    """统一整模型及 UNet 子模块并行包装产生的参数名前缀。"""
+    normalized = OrderedDict()
+    for key, value in state_dict.items():
+        new_key = key[7:] if key.startswith('module.') else key
+        for prefix in ('unet.', 'unet_up.'):
+            if new_key.startswith(prefix + 'module.'):
+                new_key = prefix + new_key[len(prefix + 'module.'):]
+                break
+        if new_key in normalized:
+            raise RuntimeError(f'并行权重参数名冲突：{key} -> {new_key}')
+        normalized[new_key] = value
+    return normalized
+
+
 def is_openai_glide_state_dict(state_dict: Dict) -> bool:
     """Check whether ``state_dict`` uses the original GLIDE module names."""
     has_openai = any(
@@ -149,7 +164,7 @@ def load_glide_state_dict(ckpt_path: str,
         dict: A ``state_dict`` ready for ``load_state_dict``.
     """
     checkpoint = _load_checkpoint(ckpt_path, map_location=map_location)
-    state_dict = unwrap_state_dict(checkpoint)
+    state_dict = normalize_parallel_state_dict(unwrap_state_dict(checkpoint))
 
     if is_openai_glide_state_dict(state_dict):
         mmengine.print_log(

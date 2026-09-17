@@ -39,7 +39,7 @@ def load_model(config, checkpoint_path, device, upsample_ckpt=None,
     import mmagic.models  # noqa: F401
     from mmagic.apis.inferencers.inference_functions import init_model
     from mmagic.models.editors.glide.glide_ckpt import (
-        load_glide_state_dict, unwrap_state_dict)
+        load_glide_state_dict, normalize_parallel_state_dict, unwrap_state_dict)
 
     config = deepcopy(config)
     # 完整 checkpoint 已包含生成参数，不再依赖训练配置中的前一阶段路径。
@@ -52,11 +52,7 @@ def load_model(config, checkpoint_path, device, upsample_ckpt=None,
 
     model = init_model(config, checkpoint=None, device='cpu')
     checkpoint = _load_checkpoint(checkpoint_path, map_location='cpu')
-    state_dict = unwrap_state_dict(checkpoint)
-    state_dict = {
-        key[7:] if key.startswith('module.') else key: value
-        for key, value in state_dict.items()
-    }
+    state_dict = normalize_parallel_state_dict(unwrap_state_dict(checkpoint))
     # VGG 仅用于训练损失；其余缺失、多余或尺寸错误的参数均不能忽略。
     state_dict = {
         key: value
@@ -67,8 +63,8 @@ def load_model(config, checkpoint_path, device, upsample_ckpt=None,
         model.load_state_dict(state_dict, strict=True)
     except RuntimeError as error:
         raise RuntimeError(
-            'checkpoint 与配置不匹配。第一阶段 checkpoint 必须搭配第一阶段配置，'
-            '第二阶段 checkpoint 必须搭配相应的风格配置。\n'
+            'checkpoint 参数仍与模型不匹配（已处理并行包装前缀）。'
+            '请根据下方缺失、多余或尺寸错误的参数检查权重和配置。\n'
             f'{error}') from error
     del checkpoint, state_dict
 

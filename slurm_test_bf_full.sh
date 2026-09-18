@@ -41,6 +41,9 @@ args=(configs/sgdiff/sgdiff-bf-style-64x64.py "$CHECKPOINT"
 GPU_COUNT=$(python -c 'import torch; assert torch.cuda.is_available(), "CUDA 不可用"; print(torch.cuda.device_count())')
 echo "固定权重：$CHECKPOINT；GPU 数：$GPU_COUNT；输出：$OUTPUT_DIR"
 srun --ntasks=1 --kill-on-bad-exit=1 python -u tools/test_sgdiff.py "${args[@]}" --mode prepare
+extended_args=(--output-dir "$OUTPUT_DIR" --clip-model "$CLIP_MODEL"
+    --mymodel-root "${MYMODEL_ROOT:-/share/home/u2515283058/Mymodel}")
+srun --ntasks=1 --kill-on-bad-exit=1 python -u tools/evaluate_bf_extended.py "${extended_args[@]}" --check-only
 
 # 单进程预先缓存风格编码器，避免多个 GPU 进程同时下载。
 python -u - <<'PY'
@@ -55,4 +58,6 @@ srun --ntasks=1 --kill-on-bad-exit=1 python -u -m torch.distributed.run \
 
 # 所有分片完成后汇总整个测试集，不能取各 GPU 的 FID 平均值。
 srun --ntasks=1 --kill-on-bad-exit=1 python -u tools/test_sgdiff.py "${args[@]}" --mode evaluate
+srun --ntasks=1 --kill-on-bad-exit=1 python -u tools/evaluate_bf_extended.py "${extended_args[@]}"
+echo "扩展指标：$OUTPUT_DIR/metrics_extended.json"
 echo "测试完成：$OUTPUT_DIR/metrics.json"

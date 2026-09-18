@@ -74,6 +74,18 @@ class TestCollectSamples(unittest.TestCase):
             [sample['sample_id'] for sample in first],
             ['000000', '000001', '000002', '000003', '000004'])
 
+    def test_all_categories_includes_extra_categories_without_sampling(self):
+        for category in ('top', 'bag', 'dress', 'outwear', 'pants'):
+            for stem in ('b', 'a'):
+                self.make_sample('test', stem, category)
+        samples = ENTRY.collect_samples(
+            self.root, 'test', max_samples=0, all_test_categories=True)
+        self.assertEqual(len(samples), 10)
+        self.assertEqual({sample['category'] for sample in samples},
+                         {'top', 'bag', 'dress', 'outwear', 'pants'})
+        self.assertEqual([sample['sample_id'] for sample in samples],
+                         [f'{index:06d}' for index in range(10)])
+
     def test_mymodel_manifest_keeps_order_and_generation_seed_ids(self):
         for stem in ('alpha', 'beta', 'gamma'):
             self.make_sample('validation', stem)

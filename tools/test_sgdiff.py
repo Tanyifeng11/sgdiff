@@ -21,6 +21,8 @@ def parse_args():
     parser.add_argument('--data-root', default='/share/home/u2515283058/datasets/BF')
     parser.add_argument('--split', choices=['validation', 'test'], default='validation')
     parser.add_argument('--split-file', help='可复用 Mymodel 的固定样本 JSON 清单')
+    parser.add_argument('--all-test-categories', action='store_true',
+                        help='读取 split 下全部类别目录，包括 bag 等额外类别')
     parser.add_argument('--max-samples', type=int, default=100, help='0 表示全部样本')
     parser.add_argument('--split-seed', type=int, default=42)
     parser.add_argument('--seed', type=int, default=42, help='逐样本种子为此值加 sample_id')
@@ -54,7 +56,7 @@ def image_index(directory, suffixes):
 
 
 def collect_samples(data_root, split='validation', max_samples=100,
-                    split_seed=42, split_file=None):
+                    split_seed=42, split_file=None, all_test_categories=False):
     """与 Mymodel 保持类顺序、抽样算法和 sample_id 对应关系。"""
     split_root = Path(data_root).resolve() / split
     samples = []
@@ -75,6 +77,9 @@ def collect_samples(data_root, split='validation', max_samples=100,
     else:
         # validation 为平铺目录；正式 test 沿用 Mymodel 的四个服装类别。
         categories = (split,) if (split_root / 'gt').is_dir() else TEST_CATEGORIES
+        if all_test_categories and not (split_root / 'gt').is_dir():
+            categories = sorted(path.name for path in split_root.iterdir()
+                                if path.is_dir() and not path.name.startswith('.'))
         for category in categories:
             root = split_root if category == split else split_root / category
             targets = image_index(root / 'gt', IMAGE_SUFFIXES)
@@ -123,7 +128,8 @@ def prepare(args):
     from tools.sgdiff_metrics import prepare_metrics
 
     samples = collect_samples(args.data_root, args.split, args.max_samples,
-                              args.split_seed, args.split_file)
+                              args.split_seed, args.split_file,
+                              args.all_test_categories)
     payload = dict(
         config=str(Path(args.config).resolve()),
         checkpoint=str(Path(args.checkpoint).resolve()),

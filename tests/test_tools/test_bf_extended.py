@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 from PIL import Image
@@ -14,6 +14,25 @@ from tools import evaluate_bf_extended as entry
 
 
 class TestExtendedMetrics(unittest.TestCase):
+    def test_legacy_torchvision_uses_pretrained_and_caches_models(self):
+        models = ModuleType('torchvision.models')
+        models.inception_v3 = Mock(return_value=Mock())
+        models.vgg19 = Mock(return_value=Mock())
+        vision = ModuleType('torchvision')
+        vision.models = models
+        transforms = ModuleType('torchvision.transforms')
+        transforms.Normalize = Mock()
+        backend = ModuleType('backend')
+        with patch.dict('sys.modules', {'torchvision': vision,
+                                        'torchvision.transforms': transforms}):
+            entry.configure_legacy_torchvision(backend)
+            backend._get_inception_v3('cpu')
+            backend._get_inception_v3('cpu')
+            backend._get_vgg_gram('cpu')
+            backend._get_vgg_gram('cpu')
+        models.inception_v3.assert_called_once_with(pretrained=True, transform_input=False)
+        models.vgg19.assert_called_once_with(pretrained=True)
+
     def test_summary_does_not_turn_missing_colors_into_zero(self):
         result = entry.summarize([{'prompt_color_delta_e': None},
                                   {'prompt_color_delta_e': float('nan')},
@@ -53,7 +72,8 @@ class TestExtendedMetrics(unittest.TestCase):
                 Image.new('RGB', (8, 8), 'white').save(root / folder / 'a.png')
             (root / 'manifest.json').write_text(json.dumps({'samples': [dict(
                 id='a', sample_id='000000', prompt='a shirt', target=str(root / 'gt/a.png'))]}))
-            with patch.dict('sys.modules', modules), patch.object(entry.sys, 'path', list(entry.sys.path)), \
+            with patch.object(entry, 'configure_legacy_torchvision'), \
+                    patch.dict('sys.modules', modules), patch.object(entry.sys, 'path', list(entry.sys.path)), \
                     patch.object(entry.sys, 'argv', ['eval', '--output-dir', str(root),
                                                      '--mymodel-root', str(root), '--device', 'cpu']):
                 entry.main()

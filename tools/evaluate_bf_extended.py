@@ -19,6 +19,38 @@ PAIR_KEYS = ('clip_i_real', 'clip_i_texture', 'tpf_patch_sim', 'tpf_gram_l1',
              'prompt_color_delta_e', 'target_color_delta_e')
 
 
+def configure_legacy_torchvision(backend):
+    """仅替换旧 torchvision 的模型加载接口，保留原指标计算与归一化。"""
+    from torchvision import models
+    from torchvision.transforms import Normalize
+
+    if hasattr(models, 'VGG19_Weights'):
+        return
+
+    def inception(device='cuda'):
+        if getattr(backend, '_inception_v3', None) is None:
+            model = models.inception_v3(pretrained=True, transform_input=False)
+            model.fc = torch.nn.Identity()
+            model.eval().requires_grad_(False)
+            backend._inception_v3 = (model, Normalize(
+                mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
+        model, normalize = backend._inception_v3
+        return model.to(device), normalize
+
+    def vgg(device='cuda'):
+        if getattr(backend, '_vgg_gram', None) is None:
+            model = models.vgg19(pretrained=True).features.eval()
+            model.requires_grad_(False)
+            backend._vgg_gram = (model, Normalize(
+                mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
+        model, normalize = backend._vgg_gram
+        return model.to(device), normalize
+
+    backend._get_inception_v3 = inception
+    backend._get_vgg_gram = vgg
+    print('启用旧 torchvision 兼容接口：pretrained=True', flush=True)
+
+
 def paired_file(directory, stem):
     matches = [p for p in directory.glob(stem + '.*')
                if p.suffix.lower() in ('.png', '.jpg', '.jpeg', '.bmp', '.webp')]
@@ -58,6 +90,8 @@ def main():
     from eval.eval_utils import prepare_evaluation_masks, json_safe
     from color_conflict_utils import extract_text_color, dominant_rgb_from_pil, delta_e_rgb
     from garment_mask_utils import mask_backend_info
+    import eval.metrics as backend
+    configure_legacy_torchvision(backend)
 
     output = Path(args.output_dir)
     manifest = json.loads((output / 'manifest.json').read_text(encoding='utf-8'))
@@ -65,6 +99,9 @@ def main():
     sketches = [paired_file(Path(s['target']).parent.parent / 'sketch',
                             Path(s['target']).stem) for s in samples]
     if args.check_only:
+        # 提前验证 VGG/Inception 接口与权重，避免生成完成后才发现不兼容。
+        backend._get_vgg_gram('cpu')
+        backend._get_inception_v3('cpu')
         print(f'扩展指标预检查通过：{len(samples)} 个草图配对；mask_policy=sketch_only')
         return
     generated = [str(output / 'generated' / (s['id'] + '.png')) for s in samples]
@@ -100,7 +137,6 @@ def main():
                 rows.append(row)
             print(f'扩展指标：{index + 1}/{len(samples)} {sample["id"]}', flush=True)
     # 释放逐图指标使用的 VGG，再加载 CLIP 和 Inception。
-    import eval.metrics as backend
     backend._vgg_gram = None
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
